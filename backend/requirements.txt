@@ -1,0 +1,40 @@
+# Web Framework
+fastapi==0.115.6
+uvicorn[standard]==0.34.0
+python-multipart==0.0.18
+
+# LLM
+anthropic==0.42.0
+openai==1.58.1
+
+# Database
+sqlalchemy[asyncio]==2.0.36
+asyncpg==0.30.0
+alembic==1.14.0
+greenlet==3.1.1
+
+# Vector DB
+chromadb==0.5.23
+
+# PDF / Document Parsing
+PyMuPDF==1.25.1
+python-docx==1.1.2
+python-pptx==1.0.2
+olefile==0.47
+
+# Utilities
+pydantic==2.10.3
+pydantic-settings==2.7.0
+python-dotenv==1.0.1
+structlog==24.4.0
+httpx==0.28.1
+aiofiles==24.1.0
+
+# PDF Report Generation
+reportlab==4.2.5
+
+# Scheduling
+apscheduler==3.10.4
+
+# Hybrid Search (BM25)
+rank_bm25==0.2.2
