@@ -56,7 +56,18 @@ export async function sendMessage(message, sessionId = null) {
   return response.json()
 }
 
-async function parseSSEStream(response, onChunk, onMetadata, onDone) {
+/**
+ * SSE 이벤트 1건을 타입별 콜백으로 전달한다.
+ * text / metadata / done 외의 이벤트(answer_meta, status 등)는 onEvent로 전달한다.
+ */
+function dispatchSSEEvent(parsed, onChunk, onMetadata, onDone, onEvent) {
+  if (parsed.type === 'text') onChunk?.(parsed)
+  else if (parsed.type === 'metadata') onMetadata?.(parsed)
+  else if (parsed.type === 'done') onDone?.(parsed)
+  else onEvent?.(parsed)
+}
+
+async function parseSSEStream(response, onChunk, onMetadata, onDone, onEvent) {
   const reader = response.body.getReader()
   const decoder = new TextDecoder()
   let buffer = ''
@@ -79,14 +90,7 @@ async function parseSSEStream(response, onChunk, onMetadata, onDone) {
 
         try {
           const parsed = JSON.parse(data)
-
-          if (parsed.type === 'text' && onChunk) {
-            onChunk(parsed)
-          } else if (parsed.type === 'metadata' && onMetadata) {
-            onMetadata(parsed)
-          } else if (parsed.type === 'done' && onDone) {
-            onDone(parsed)
-          }
+          dispatchSSEEvent(parsed, onChunk, onMetadata, onDone, onEvent)
         } catch (e) {
           console.error('Failed to parse SSE data:', e)
         }
@@ -101,9 +105,7 @@ async function parseSSEStream(response, onChunk, onMetadata, onDone) {
         if (data !== '[DONE]') {
           try {
             const parsed = JSON.parse(data)
-            if (parsed.type === 'text' && onChunk) onChunk(parsed)
-            else if (parsed.type === 'metadata' && onMetadata) onMetadata(parsed)
-            else if (parsed.type === 'done' && onDone) onDone(parsed)
+            dispatchSSEEvent(parsed, onChunk, onMetadata, onDone, onEvent)
           } catch (e) {
             console.error('SSE 잔여 데이터 파싱 실패:', e)
           }
@@ -115,11 +117,17 @@ async function parseSSEStream(response, onChunk, onMetadata, onDone) {
   }
 }
 
-export async function sendMessageStream(message, sessionId, onChunk, onMetadata, onDone) {
+/**
+ * @param {Object} [options]
+ * @param {string|null} [options.category] - 사용자가 직접 고른 분야 (없으면 자동 분류)
+ * @param {AbortSignal} [options.signal] - 답변 생성 중단용
+ */
+export async function sendMessageStream(message, sessionId, onChunk, onMetadata, onDone, onEvent, options = {}) {
   const response = await fetch(`${BASE_URL}/chat/stream`, {
     method: 'POST',
     headers: getHeaders(),
-    body: JSON.stringify({ message, session_id: sessionId }),
+    body: JSON.stringify({ message, session_id: sessionId, category: options.category || null }),
+    signal: options.signal,
   })
 
   if (!response.ok) {
@@ -133,7 +141,19 @@ export async function sendMessageStream(message, sessionId, onChunk, onMetadata,
     throw new Error(errorMessage)
   }
 
-  await parseSSEStream(response, onChunk, onMetadata, onDone)
+  await parseSSEStream(response, onChunk, onMetadata, onDone, onEvent)
+}
+
+/** 질문 다듬기 — 모호한 질문을 답변하기 좋은 형태로 정리 */
+export async function refineQuestion(message) {
+  const response = await fetch(`${BASE_URL}/chat/refine`, {
+    method: 'POST',
+    headers: getHeaders(),
+    body: JSON.stringify({ message }),
+  })
+  if (!response.ok) throw new Error('질문 다듬기에 실패했습니다')
+  const data = await response.json()
+  return data.refined
 }
 
 export async function getSessions() {
@@ -339,11 +359,12 @@ export async function getDashboard() {
 
 // === 정보보안 Q&A API ===
 
-export async function sendSecurityMessageStream(message, sessionId, onChunk, onMetadata, onDone) {
+export async function sendSecurityMessageStream(message, sessionId, onChunk, onMetadata, onDone, onEvent, options = {}) {
   const response = await fetch(`${BASE_URL}/security/stream`, {
     method: 'POST',
     headers: getHeaders(),
     body: JSON.stringify({ message, session_id: sessionId }),
+    signal: options.signal,
   })
 
   if (!response.ok) {
@@ -357,7 +378,7 @@ export async function sendSecurityMessageStream(message, sessionId, onChunk, onM
     throw new Error(errorMessage)
   }
 
-  await parseSSEStream(response, onChunk, onMetadata, onDone)
+  await parseSSEStream(response, onChunk, onMetadata, onDone, onEvent)
 }
 
 export async function getSecuritySessions() {

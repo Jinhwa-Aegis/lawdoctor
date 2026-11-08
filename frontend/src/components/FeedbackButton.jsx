@@ -2,7 +2,8 @@ import React, { useState } from 'react';
 import { ThumbsUp, ThumbsDown, X } from 'lucide-react';
 import { sendFeedback } from '../api/client';
 
-const FeedbackButton = ({ messageId }) => {
+/** compact: 답변 액션 바 안에서 아이콘만 표시 */
+const FeedbackButton = ({ messageId, compact = false }) => {
   const [feedbackGiven, setFeedbackGiven] = useState(null);
   const [showReasonModal, setShowReasonModal] = useState(false);
   const [selectedReason, setSelectedReason] = useState('');
@@ -56,14 +57,14 @@ const FeedbackButton = ({ messageId }) => {
 
   return (
     <>
-      <div className="flex items-center gap-2">
+      <div className={`flex items-center ${compact ? 'gap-0.5' : 'gap-2'}`}>
         {feedbackGiven ? (
-          <p className="text-sm text-green-600 font-medium">
+          <p className={compact ? 'text-xs text-green-600 px-2' : 'text-sm text-green-600 font-medium'}>
             피드백 감사합니다!
           </p>
         ) : (
           <>
-            <span className="text-xs text-gray-500">이 답변이 도움이 되었나요?</span>
+            {!compact && <span className="text-xs text-gray-500">이 답변이 도움이 되었나요?</span>}
             <button
               onClick={handlePositiveFeedback}
               disabled={isSubmitting}

@@ -1,87 +1,56 @@
 import { Outlet, NavLink } from 'react-router-dom'
-import { MessageSquare, Shield, FileSearch, Settings } from 'lucide-react'
+import { MessageSquare, Shield, FileSearch, Settings, Scale } from 'lucide-react'
 
+const NAV_ITEMS = [
+  { to: '/chat', icon: MessageSquare, label: '법률 Q&A' },
+  { to: '/security', icon: Shield, label: '보안 Q&A' },
+  { to: '/review', icon: FileSearch, label: '계약서 리뷰' },
+  { to: '/admin', icon: Settings, label: '관리자' },
+]
+
+/**
+ * 앱 셸 — 좁은 아이콘 레일 + 본문
+ * 대화 기록 패널은 각 채팅 화면이 자체적으로 접고 펼친다.
+ */
 export default function Layout() {
   return (
-    <div className="flex h-screen bg-gray-50">
-      {/* Sidebar */}
-      <aside className="w-64 bg-white border-r border-gray-200 flex flex-col">
-        {/* Logo/Title */}
-        <div className="p-6 border-b border-gray-200">
-          <h1 className="text-2xl font-bold text-primary-600">법무주치의</h1>
-          <p className="text-sm text-gray-500 mt-1">AI 법률 자문 서비스</p>
-        </div>
+    <div className="flex h-screen bg-slate-50">
+      <aside className="w-[76px] flex-shrink-0 bg-white border-r border-slate-200 flex flex-col items-center py-4">
+        {/* 로고 */}
+        <NavLink to="/chat" className="mb-6 flex flex-col items-center gap-1" title="법무주치의">
+          <span className="w-10 h-10 rounded-xl bg-primary-600 text-white flex items-center justify-center shadow-sm">
+            <Scale className="w-5 h-5" />
+          </span>
+          <span className="text-[10px] font-bold tracking-tight text-slate-800">법무주치의</span>
+        </NavLink>
 
-        {/* Navigation */}
-        <nav className="flex-1 p-4 space-y-2">
-          <NavLink
-            to="/chat"
-            className={({ isActive }) =>
-              `flex items-center gap-3 px-4 py-3 rounded-lg transition-colors ${
-                isActive
-                  ? 'bg-primary-50 text-primary-700 font-medium'
-                  : 'text-gray-700 hover:bg-gray-100'
-              }`
-            }
-          >
-            <MessageSquare className="w-5 h-5" />
-            <span>법률 Q&A</span>
-          </NavLink>
-
-          <NavLink
-            to="/security"
-            className={({ isActive }) =>
-              `flex items-center gap-3 px-4 py-3 rounded-lg transition-colors ${
-                isActive
-                  ? 'bg-primary-50 text-primary-700 font-medium'
-                  : 'text-gray-700 hover:bg-gray-100'
-              }`
-            }
-          >
-            <Shield className="w-5 h-5" />
-            <span>정보보안 Q&A</span>
-          </NavLink>
-
-          <NavLink
-            to="/review"
-            className={({ isActive }) =>
-              `flex items-center gap-3 px-4 py-3 rounded-lg transition-colors ${
-                isActive
-                  ? 'bg-primary-50 text-primary-700 font-medium'
-                  : 'text-gray-700 hover:bg-gray-100'
-              }`
-            }
-          >
-            <FileSearch className="w-5 h-5" />
-            <span>계약서 리뷰</span>
-          </NavLink>
-
-          <NavLink
-            to="/admin"
-            className={({ isActive }) =>
-              `flex items-center gap-3 px-4 py-3 rounded-lg transition-colors ${
-                isActive
-                  ? 'bg-primary-50 text-primary-700 font-medium'
-                  : 'text-gray-700 hover:bg-gray-100'
-              }`
-            }
-          >
-            <Settings className="w-5 h-5" />
-            <span>관리자</span>
-          </NavLink>
+        <nav className="flex-1 flex flex-col items-center gap-1 w-full px-2">
+          {NAV_ITEMS.map(({ to, icon: Icon, label }) => (
+            <NavLink
+              key={to}
+              to={to}
+              className={({ isActive }) =>
+                `w-full flex flex-col items-center gap-1 py-2.5 rounded-xl transition-colors ${
+                  isActive
+                    ? 'bg-primary-50 text-primary-700'
+                    : 'text-slate-500 hover:bg-slate-100 hover:text-slate-800'
+                }`
+              }
+            >
+              <Icon className="w-5 h-5" />
+              <span className="text-[11px] font-medium leading-none">{label}</span>
+            </NavLink>
+          ))}
         </nav>
 
-        {/* Disclaimer */}
-        <div className="p-4 border-t border-gray-200">
-          <p className="text-xs text-gray-500 leading-relaxed">
-            본 서비스는 참고용 법률·보안 정보를 제공하며, 정식 전문가 자문을 대체하지 않습니다.
-            중요한 결정이 필요한 경우 반드시 전문가와 상담하시기 바랍니다.
-          </p>
-        </div>
+        <p className="text-[10px] text-slate-400 text-center leading-tight px-1">
+          사내 전용
+          <br />
+          참고용 정보
+        </p>
       </aside>
 
-      {/* Main Content Area */}
-      <main className="flex-1 overflow-y-auto">
+      <main className="flex-1 min-w-0 overflow-y-auto">
         <Outlet />
       </main>
     </div>
