@@ -194,9 +194,22 @@ export async function deleteSession(sessionId) {
   return response.json()
 }
 
-export async function uploadContract(file) {
+export async function getContractTypes() {
+  const response = await fetch(`${BASE_URL}/review/contract-types`, {
+    headers: getHeaders(),
+  })
+  if (!response.ok) throw new Error('계약 유형 목록을 불러오지 못했습니다')
+  return response.json()
+}
+
+/**
+ * @param {File} file - 계약서 파일
+ * @param {string} contractType - 점검표 유형 키 (auto면 자동 감지)
+ */
+export async function uploadContract(file, contractType = 'auto') {
   const formData = new FormData()
   formData.append('file', file)
+  formData.append('contract_type', contractType)
 
   const response = await fetch(`${BASE_URL}/review`, {
     method: 'POST',

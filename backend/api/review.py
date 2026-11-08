@@ -5,13 +5,14 @@ import uuid
 
 import aiofiles
 import structlog
-from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from fastapi.responses import JSONResponse
 
 from config import settings
 from middleware.auth import get_current_user
 from models.user import User
 from core.contract_reviewer import review_contract, ContractReviewResult
+from core.contract_checklists import AUTO_DETECT, CONTRACT_TYPES, list_contract_types
 
 logger = structlog.get_logger()
 
@@ -20,12 +21,25 @@ router = APIRouter()
 ALLOWED_EXTENSIONS = {".pdf", ".docx", ".hwp", ".hwpx", ".txt"}
 
 
+@router.get("/contract-types")
+async def get_contract_types(user: User = Depends(get_current_user)) -> list[dict]:
+    """계약 유형별 점검표 목록 (유형 선택 UI용)"""
+    return list_contract_types()
+
+
 @router.post("", response_model=ContractReviewResult)
 async def upload_and_review(
     file: UploadFile = File(...),
+    contract_type: str = Form(AUTO_DETECT),
     user: User = Depends(get_current_user),
 ):
-    """계약서 업로드 및 리스크 분석"""
+    """계약서 업로드 및 리스크 분석
+
+    contract_type: 점검표 유형 키 (auto면 자동 감지)
+    """
+    if contract_type != AUTO_DETECT and contract_type not in CONTRACT_TYPES:
+        raise HTTPException(status_code=400, detail="지원하지 않는 계약 유형입니다.")
+
     # 파일 확장자 검증
     ext = os.path.splitext(file.filename)[1].lower() if file.filename else ""
     if ext not in ALLOWED_EXTENSIONS:
@@ -59,7 +73,8 @@ async def upload_and_review(
     )
 
     try:
-        result = await review_contract(filepath)
+        result = await review_contract(filepath, contract_type=contract_type)
+        result.file_name = file.filename or ""
         return result
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
