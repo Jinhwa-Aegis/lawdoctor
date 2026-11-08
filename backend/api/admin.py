@@ -2,7 +2,10 @@
 
 import os
 import uuid
+from collections import Counter
+from datetime import date, datetime, timedelta, timezone
 from typing import Optional
+from zoneinfo import ZoneInfo
 
 import aiofiles
 import structlog
@@ -15,7 +18,7 @@ from config import settings
 from db.database import get_db
 from middleware.auth import get_current_user, require_role
 from models.user import User, UserRole
-from models.chat import ChatSession, ChatMessage
+from models.chat import ChatSession, ChatMessage, MessageRole
 from models.feedback import Feedback, FeedbackType
 from models.document import Document, DocumentType, DocumentSource
 from data.vector_store import get_vector_store
@@ -23,6 +26,65 @@ from data.vector_store import get_vector_store
 logger = structlog.get_logger()
 
 router = APIRouter()
+
+KST = ZoneInfo("Asia/Seoul")
+ACTIVITY_DAYS = 14
+# 인용 검증에서 문제로 보는 상태 (core.citation_verifier 의 STATUS_* 값)
+_CITATION_PROBLEM_STATUSES = {"repealed", "not_found", "unknown_law"}
+
+
+def count_citation_issues(answer_meta: dict | None) -> int:
+    """답변 메타에서 문제(폐지·없음·미확인 법령) 인용 수"""
+    if not isinstance(answer_meta, dict):
+        return 0
+    citations = answer_meta.get("verified_citations") or []
+    return sum(
+        1 for c in citations
+        if isinstance(c, dict) and c.get("status") in _CITATION_PROBLEM_STATUSES
+    )
+
+
+def summarize_activity(rows: list[dict], days: int, today: date) -> dict:
+    """최근 days일의 일별 질문 수와 답변 품질 지표를 집계한다.
+
+    rows: {"role", "created_at"(aware datetime), "confidence", "answer_meta"}
+    날짜는 한국 시간 기준으로 나눈다.
+    """
+    start = today - timedelta(days=days - 1)
+    per_day: Counter = Counter()
+    answers = citation_issue_answers = low_confidence_answers = 0
+    for r in rows:
+        created = r["created_at"]
+        if created.tzinfo is None:
+            created = created.replace(tzinfo=timezone.utc)
+        day = created.astimezone(KST).date()
+        if day < start or day > today:
+            continue
+        if r["role"] == MessageRole.USER.value:
+            per_day[day] += 1
+        elif r["role"] == MessageRole.ASSISTANT.value:
+            answers += 1
+            if count_citation_issues(r["answer_meta"]) > 0:
+                citation_issue_answers += 1
+            if r["confidence"] == "low":
+                low_confidence_answers += 1
+    daily = [
+        {"date": (start + timedelta(days=i)).isoformat(), "count": per_day[start + timedelta(days=i)]}
+        for i in range(days)
+    ]
+    return {
+        "daily_questions": daily,
+        "recent_answers": answers,
+        "citation_issue_answers": citation_issue_answers,
+        "low_confidence_answers": low_confidence_answers,
+    }
+
+
+def _excerpt(text: str, limit: int = 240) -> str:
+    """답변 앞부분 요약 (표 행과 마크다운 기호 제거)"""
+    lines = [ln for ln in (text or "").splitlines() if not ln.lstrip().startswith("|")]
+    flat = " ".join("\n".join(lines).replace("#", "").replace("**", "").split())
+    return flat if len(flat) <= limit else flat[:limit].rstrip() + "…"
 
 
 # === Request / Response 스키마 ===
@@ -53,6 +115,26 @@ class DashboardStats(BaseModel):
     total_messages: int
     total_feedbacks: int
     positive_feedback_ratio: float
+    # 최근 ACTIVITY_DAYS일 지표
+    daily_questions: list[dict] = []
+    recent_answers: int = 0
+    citation_issue_answers: int = 0
+    low_confidence_answers: int = 0
+
+
+class RecentFeedbackItem(BaseModel):
+    id: int
+    message_id: int
+    session_id: int
+    feedback_type: str
+    reason: Optional[str] = None
+    comment: Optional[str] = None
+    user_name: str
+    question: str
+    answer_excerpt: str
+    confidence: Optional[str] = None
+    citation_issues: int = 0
+    created_at: str
 
 
 class PdfUploadResponse(BaseModel):
@@ -202,13 +284,87 @@ async def get_dashboard(
 
     ratio = round(positive_feedbacks / total_feedbacks * 100, 1) if total_feedbacks > 0 else 0.0
 
+    # 최근 N일 활동·답변 품질 — 사용자 수(10~30명) 규모라 Python에서 집계
+    since = datetime.now(timezone.utc) - timedelta(days=ACTIVITY_DAYS)
+    recent_rows = (
+        await db.execute(
+            select(ChatMessage.role, ChatMessage.created_at, ChatMessage.confidence, ChatMessage.answer_meta)
+            .where(ChatMessage.created_at >= since)
+        )
+    ).all()
+    activity = summarize_activity(
+        [
+            {
+                "role": r.role.value if hasattr(r.role, "value") else r.role,
+                "created_at": r.created_at,
+                "confidence": r.confidence.value if r.confidence is not None else None,
+                "answer_meta": r.answer_meta,
+            }
+            for r in recent_rows
+        ],
+        days=ACTIVITY_DAYS,
+        today=datetime.now(KST).date(),
+    )
+
     return DashboardStats(
         total_users=total_users,
         total_sessions=total_sessions,
         total_messages=total_messages,
         total_feedbacks=total_feedbacks,
         positive_feedback_ratio=ratio,
+        **activity,
     )
+
+
+@router.get("/feedback/recent", response_model=list[RecentFeedbackItem])
+async def get_recent_feedback(
+    feedback_type: FeedbackType = Query(default=FeedbackType.NEGATIVE),
+    limit: int = Query(default=20, ge=1, le=100),
+    user: User = Depends(require_role(UserRole.EXECUTIVE)),
+    db: AsyncSession = Depends(get_db),
+):
+    """최근 피드백과 해당 질문·답변 (경영진 전용) — 답변 품질 점검용"""
+    rows = (
+        await db.execute(
+            select(Feedback, ChatMessage, User.display_name)
+            .join(ChatMessage, Feedback.message_id == ChatMessage.id)
+            .join(User, Feedback.user_id == User.id)
+            .where(Feedback.feedback_type == feedback_type)
+            .order_by(Feedback.created_at.desc())
+            .limit(limit)
+        )
+    ).all()
+
+    items: list[RecentFeedbackItem] = []
+    for fb, msg, display_name in rows:
+        # 답변 직전의 사용자 질문
+        question = (
+            await db.execute(
+                select(ChatMessage.content)
+                .where(
+                    ChatMessage.session_id == msg.session_id,
+                    ChatMessage.id < msg.id,
+                    ChatMessage.role == MessageRole.USER,
+                )
+                .order_by(ChatMessage.id.desc())
+                .limit(1)
+            )
+        ).scalar()
+        items.append(RecentFeedbackItem(
+            id=fb.id,
+            message_id=msg.id,
+            session_id=msg.session_id,
+            feedback_type=fb.feedback_type.value,
+            reason=fb.reason.value if fb.reason else None,
+            comment=fb.comment,
+            user_name=display_name,
+            question=question or "",
+            answer_excerpt=_excerpt(msg.content),
+            confidence=msg.confidence.value if msg.confidence else None,
+            citation_issues=count_citation_issues(msg.answer_meta),
+            created_at=fb.created_at.isoformat(),
+        ))
+    return items
 
 
 @router.post("/ingest/security", response_model=IngestResponse)

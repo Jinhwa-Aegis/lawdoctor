@@ -1,130 +1,74 @@
 import React, { useState, useRef } from 'react';
-import { Upload, X } from 'lucide-react';
+import { UploadCloud, X } from 'lucide-react';
 
+/** 파일 선택 영역 — 드래그 앤 드롭 또는 클릭 (형식·크기 검사) */
 const FileUpload = ({ onFileSelect, accept = '*', maxSizeMB = 50 }) => {
   const [isDragging, setIsDragging] = useState(false);
   const [error, setError] = useState(null);
   const fileInputRef = useRef(null);
 
   const validateFile = (file) => {
-    const maxSizeBytes = maxSizeMB * 1024 * 1024;
-
-    if (file.size > maxSizeBytes) {
-      setError(`파일 크기는 ${maxSizeMB}MB를 초과할 수 없습니다.`);
+    if (file.size > maxSizeMB * 1024 * 1024) {
+      setError(`파일 크기는 ${maxSizeMB}MB를 넘을 수 없습니다.`);
       return false;
     }
-
     if (accept !== '*') {
-      const acceptedExtensions = accept.split(',').map(ext => ext.trim());
-      const fileExtension = '.' + file.name.split('.').pop().toLowerCase();
-
-      if (!acceptedExtensions.includes(fileExtension)) {
-        setError(`지원되지 않는 파일 형식입니다. (${accept})`);
+      const accepted = accept.split(',').map((ext) => ext.trim());
+      const ext = '.' + file.name.split('.').pop().toLowerCase();
+      if (!accepted.includes(ext)) {
+        setError(`지원하지 않는 형식입니다. (${accept})`);
         return false;
       }
     }
-
     setError(null);
     return true;
   };
 
   const handleFile = (file) => {
-    if (validateFile(file)) {
-      onFileSelect(file);
-    }
+    if (file && validateFile(file)) onFileSelect(file);
   };
 
-  const handleDragEnter = (e) => {
+  const stop = (e) => {
     e.preventDefault();
     e.stopPropagation();
-    setIsDragging(true);
-  };
-
-  const handleDragLeave = (e) => {
-    e.preventDefault();
-    e.stopPropagation();
-    setIsDragging(false);
-  };
-
-  const handleDragOver = (e) => {
-    e.preventDefault();
-    e.stopPropagation();
-  };
-
-  const handleDrop = (e) => {
-    e.preventDefault();
-    e.stopPropagation();
-    setIsDragging(false);
-
-    const files = e.dataTransfer.files;
-    if (files && files.length > 0) {
-      handleFile(files[0]);
-    }
-  };
-
-  const handleFileInputChange = (e) => {
-    const files = e.target.files;
-    if (files && files.length > 0) {
-      handleFile(files[0]);
-    }
-  };
-
-  const handleClick = () => {
-    fileInputRef.current?.click();
   };
 
   return (
     <div>
       <div
-        onClick={handleClick}
-        onDragEnter={handleDragEnter}
-        onDragOver={handleDragOver}
-        onDragLeave={handleDragLeave}
-        onDrop={handleDrop}
-        className={`relative border-2 border-dashed rounded-lg p-12 text-center cursor-pointer transition-all ${
+        role="button"
+        tabIndex={0}
+        onClick={() => fileInputRef.current?.click()}
+        onKeyDown={(e) => (e.key === 'Enter' || e.key === ' ') && fileInputRef.current?.click()}
+        onDragEnter={(e) => { stop(e); setIsDragging(true); }}
+        onDragOver={stop}
+        onDragLeave={(e) => { stop(e); setIsDragging(false); }}
+        onDrop={(e) => { stop(e); setIsDragging(false); handleFile(e.dataTransfer.files?.[0]); }}
+        className={`flex flex-col items-center justify-center rounded-xl border-2 border-dashed px-6 py-8 text-center cursor-pointer transition-colors focus:outline-none focus:ring-2 focus:ring-primary-100 ${
           isDragging
-            ? 'border-blue-500 bg-blue-50'
-            : 'border-gray-300 hover:border-gray-400 bg-gray-50 hover:bg-gray-100'
+            ? 'border-primary-400 bg-primary-50'
+            : 'border-slate-200 bg-slate-50 hover:border-slate-300 hover:bg-slate-100/60'
         }`}
       >
         <input
           ref={fileInputRef}
           type="file"
           accept={accept}
-          onChange={handleFileInputChange}
+          onChange={(e) => { handleFile(e.target.files?.[0]); e.target.value = ''; }}
           className="hidden"
         />
-
-        <Upload
-          size={48}
-          className={`mx-auto mb-4 ${
-            isDragging ? 'text-blue-600' : 'text-gray-400'
-          }`}
-        />
-
-        <h3 className="text-lg font-semibold text-gray-900 mb-2">
-          파일을 드래그하거나 클릭하여 업로드
-        </h3>
-
-        <p className="text-sm text-gray-600 mb-4">
-          {accept === '*'
-            ? '모든 파일 형식 지원'
-            : `지원 형식: ${accept.replace(/\./g, '').toUpperCase()}`}
-        </p>
-
-        <p className="text-xs text-gray-500">
-          최대 파일 크기: {maxSizeMB}MB
+        <UploadCloud className={`w-8 h-8 mb-2 ${isDragging ? 'text-primary-600' : 'text-slate-400'}`} />
+        <p className="text-[13.5px] font-medium text-slate-800">파일을 끌어다 놓거나 클릭해서 선택</p>
+        <p className="mt-1 text-[12px] text-slate-500">
+          {accept === '*' ? '모든 형식' : accept.replace(/\./g, '').toUpperCase().split(',').join(' · ')} · 최대 {maxSizeMB}MB
         </p>
       </div>
 
       {error && (
-        <div className="mt-4 p-3 bg-red-50 border border-red-200 rounded-lg flex items-center justify-between">
-          <p className="text-sm text-red-800">{error}</p>
-          <button
-            onClick={() => setError(null)}
-            className="text-red-600 hover:text-red-800 transition-colors"
-          >
-            <X size={16} />
+        <div role="alert" className="mt-3 flex items-center justify-between rounded-lg border border-red-200 bg-red-50 px-3 py-2">
+          <p className="text-[12.5px] text-red-800">{error}</p>
+          <button type="button" onClick={() => setError(null)} className="text-red-500 hover:text-red-700" aria-label="오류 닫기">
+            <X size={14} />
           </button>
         </div>
       )}

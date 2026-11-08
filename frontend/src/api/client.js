@@ -357,6 +357,50 @@ export async function getDashboard() {
   return response.json()
 }
 
+/** 응답 오류를 한국어 메시지로 바꿔 던진다 */
+async function throwResponseError(response, fallback) {
+  let message = fallback
+  try {
+    const body = await response.json()
+    message = body.detail || body.message || message
+  } catch {
+    // 서버가 비JSON 응답 반환
+  }
+  throw new Error(message)
+}
+
+/** 사용자 역할·활성 상태 수정 (경영진 전용) */
+export async function updateUser(userId, data) {
+  const response = await fetch(`${BASE_URL}/admin/users/${userId}`, {
+    method: 'PATCH',
+    headers: getHeaders(),
+    body: JSON.stringify(data),
+  })
+  if (!response.ok) await throwResponseError(response, '사용자 정보를 수정하지 못했습니다')
+  return response.json()
+}
+
+/** 최근 피드백 + 질문·답변 (기본: 부정 피드백) */
+export async function getRecentFeedback(feedbackType = 'negative', limit = 20) {
+  const qs = new URLSearchParams({ feedback_type: feedbackType, limit: String(limit) })
+  const response = await fetch(`${BASE_URL}/admin/feedback/recent?${qs}`, {
+    headers: { 'X-User-ID': getUserId() },
+  })
+  if (!response.ok) await throwResponseError(response, '피드백 목록을 불러올 수 없습니다')
+  return response.json()
+}
+
+/** 내장 보안 지식베이스 적재 */
+export async function ingestBuiltinSecurity() {
+  const response = await fetch(`${BASE_URL}/admin/ingest/security`, {
+    method: 'POST',
+    headers: getHeaders(),
+    body: JSON.stringify({}),
+  })
+  if (!response.ok) await throwResponseError(response, '내장 지식베이스 적재에 실패했습니다')
+  return response.json()
+}
+
 // === 정보보안 Q&A API ===
 
 export async function sendSecurityMessageStream(message, sessionId, onChunk, onMetadata, onDone, onEvent, options = {}) {
