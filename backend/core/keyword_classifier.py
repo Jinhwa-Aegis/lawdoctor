@@ -53,19 +53,22 @@ class KeywordClassifier:
             return keyword in text
         return keyword.lower() in text.lower()
 
+    def score(self, query: str) -> dict[Enum, int]:
+        """분야별 키워드 매칭 횟수"""
+        scores: dict[Enum, int] = {cat: 0 for cat in self.category_keywords}
+        for category, keywords in self.category_keywords.items():
+            for keyword in keywords:
+                if self._match(keyword, query):
+                    scores[category] += 1
+        return scores
+
     def classify(self, query: str) -> Enum:
         """키워드 매칭 기반 분야 분류
 
         각 분야별 키워드 매칭 횟수를 합산하여 가장 높은 점수의 분야를 반환한다.
         매칭되는 키워드가 하나도 없으면 default_category를 반환한다.
         """
-        scores: dict[Enum, int] = {cat: 0 for cat in self.category_keywords}
-
-        for category, keywords in self.category_keywords.items():
-            for keyword in keywords:
-                if self._match(keyword, query):
-                    scores[category] += 1
-
+        scores = self.score(query)
         max_category = max(scores, key=lambda k: scores[k])
         if scores[max_category] == 0:
             return self.default_category
@@ -94,12 +97,18 @@ class KeywordClassifier:
             도메인별 모듈이 이 결과를 자신의 Pydantic 결과 모델로 변환한다.
         """
         category = self.classify(query)
+        # 주 분야 외에 키워드가 하나라도 걸린 분야 — 복합 질의의 검색 범위 확장에 사용
+        related_categories = [
+            cat for cat, sc in sorted(self.score(query).items(), key=lambda kv: -kv[1])
+            if sc > 0 and cat != category
+        ]
         is_high_risk, detected_keywords = self.detect_high_risk(query)
         requires_escalation = is_high_risk or category in self.escalation_categories
 
         logger.info(
             f"{self.domain_name} 질의 분석 결과",
             category=category.value,
+            related_categories=[c.value for c in related_categories],
             is_high_risk=is_high_risk,
             detected_keywords=detected_keywords,
             requires_escalation=requires_escalation,
@@ -107,6 +116,7 @@ class KeywordClassifier:
 
         return {
             "category": category,
+            "related_categories": related_categories,
             "is_high_risk": is_high_risk,
             "detected_keywords": detected_keywords,
             "requires_escalation": requires_escalation,

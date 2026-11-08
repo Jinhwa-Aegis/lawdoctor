@@ -62,6 +62,7 @@ class MessageItem(BaseModel):
     confidence: Optional[str] = None
     security_references: Optional[list[dict]] = None
     is_escalated: bool = False
+    answer_meta: Optional[dict] = None
     created_at: str
 
 
@@ -188,6 +189,7 @@ async def security_chat_stream(
     async def event_generator():
         full_answer = ""
         metadata = {}
+        answer_meta = None
 
         async for chunk in security_rag_query_stream(req.message, session_messages=prev_messages):
             if chunk["type"] == "metadata":
@@ -196,9 +198,19 @@ async def security_chat_stream(
             elif chunk["type"] == "text":
                 full_answer += chunk["content"]
                 yield f"data: {json.dumps(chunk, ensure_ascii=False)}\n\n"
+            elif chunk["type"] in ("status", "perspectives"):
+                # 진행 상태 안내 (예: 인용 검증 중)
+                yield f"data: {json.dumps(chunk, ensure_ascii=False)}\n\n"
+            elif chunk["type"] == "answer_meta":
+                # 인용 검증 결과 + 후속 질문
+                answer_meta = {k: v for k, v in chunk.items() if k != "type"}
+                # 인라인 [N] 인용 번호와 근거 자료 연결을 다시 열었을 때도 유지
+                answer_meta["citations"] = metadata.get("citations", [])
+                yield f"data: {json.dumps(chunk, ensure_ascii=False)}\n\n"
             elif chunk["type"] == "done":
                 # AI 답변 DB 저장
-                confidence_val = metadata.get("confidence", "medium")
+                # 후처리에서 계산한 최종 신뢰도 우선 (검색·AI 평가·인용 검증 통합)
+                confidence_val = (answer_meta or {}).get("confidence") or metadata.get("confidence", "medium")
                 ai_msg = ChatMessage(
                     session_id=session.id,
                     role=MessageRole.ASSISTANT,
@@ -206,6 +218,7 @@ async def security_chat_stream(
                     confidence=ConfidenceLevel(confidence_val),
                     security_references=metadata.get("security_references", []),
                     is_escalated=classification.requires_escalation,
+                    answer_meta=answer_meta,
                 )
                 db.add(ai_msg)
                 await db.flush()
@@ -218,7 +231,7 @@ async def security_chat_stream(
 
                 await db.commit()
 
-                yield f"data: {json.dumps({'type': 'done', 'session_id': session.id}, ensure_ascii=False)}\n\n"
+                yield f"data: {json.dumps({'type': 'done', 'session_id': session.id, 'message_id': ai_msg.id}, ensure_ascii=False)}\n\n"
 
     return StreamingResponse(
         event_generator(),
@@ -305,6 +318,7 @@ async def get_security_session_messages(
             confidence=m.confidence.value if m.confidence else None,
             security_references=m.security_references,
             is_escalated=m.is_escalated,
+            answer_meta=m.answer_meta,
             created_at=m.created_at.isoformat(),
         )
         for m in messages

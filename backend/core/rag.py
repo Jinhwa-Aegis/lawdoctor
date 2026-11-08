@@ -6,6 +6,8 @@
 from typing import AsyncGenerator
 
 from core.classifier import analyze_query
+from core.legal_terms import concept_queries, expand_legal_terms
+from core.multi_perspective import PerspectiveConfig
 from core.llm import SYSTEM_PROMPT_LEGAL_QA
 from core.rag_pipeline import (
     CollectionConfig,
@@ -32,10 +34,19 @@ _CATEGORY_LAW_NAMES: dict[LegalCategory, list[str]] = {
 
 
 def _build_laws_where_filter(classification) -> dict | None:
-    """분류 결과에 따라 법령 컬렉션의 where 필터를 생성한다."""
-    law_names = _CATEGORY_LAW_NAMES.get(classification.category, [])
-    if not law_names:
-        return None
+    """분류 결과에 따라 법령 컬렉션의 where 필터를 생성한다.
+
+    주 분야와 관련 분야의 법령을 합쳐 검색한다.
+    (예: "아파트 CCTV 열람" → 공동주택관리법·주택법 + 개인정보 보호법·정보통신망법)
+    필터 없이 전체를 검색해야 하는 분야(소송)가 하나라도 포함되면 필터를 걸지 않는다.
+    """
+    categories = [classification.category, *getattr(classification, "related_categories", [])]
+    law_names: list[str] = []
+    for category in categories:
+        names = _CATEGORY_LAW_NAMES.get(category, [])
+        if not names:
+            return None
+        law_names.extend(n for n in names if n not in law_names)
     if len(law_names) == 1:
         return {"source": {"$eq": law_names[0]}}
     return {"$or": [{"source": {"$eq": name}} for name in law_names]}
@@ -220,6 +231,26 @@ _config = RAGConfig(
     domain_name="법률",
     enable_query_rewrite=True,
     enable_multihop=True,
+    enable_citation_verification=True,
+    enable_followups=True,
+    expand_query_fn=expand_legal_terms,
+    concept_queries_fn=concept_queries,
+    # 복수 분야 질의 → 분야별 검토 후 의견 대조 (소송은 경영진 전용이라 제외)
+    perspective=PerspectiveConfig(
+        labels={
+            LegalCategory.PRIVACY: "개인정보보호",
+            LegalCategory.CONTRACT: "계약",
+            LegalCategory.HOUSING: "공동주택관리",
+        },
+        focus={
+            LegalCategory.PRIVACY: "개인정보 보호법·정보통신망법상 수집·이용·제공·위탁·영상정보 요건",
+            LegalCategory.CONTRACT: "민법·상법상 계약 당사자의 권리·의무와 책임",
+            LegalCategory.HOUSING: "공동주택관리법·주택법상 관리주체·입주자대표회의의 권한과 절차",
+        },
+        law_collection="laws",
+        excluded={LegalCategory.LITIGATION},
+        domain_sources=_CATEGORY_LAW_NAMES,
+    ),
 )
 
 
@@ -230,16 +261,17 @@ _config = RAGConfig(
 async def rag_query(
     query: str,
     session_messages: list[dict] | None = None,
+    category: LegalCategory | None = None,
 ) -> dict:
-    """RAG 기반 법률 Q&A — 일반 응답"""
-    return await _generic_rag_query(query, _config, session_messages)
+    """RAG 기반 법률 Q&A — 일반 응답 (category: 사용자가 직접 고른 분야)"""
+    return await _generic_rag_query(query, _config, session_messages, category)
 
 
 async def rag_query_stream(
     query: str,
     session_messages: list[dict] | None = None,
+    category: LegalCategory | None = None,
 ) -> AsyncGenerator[dict, None]:
-    """RAG 기반 법률 Q&A — 스트리밍 응답"""
-    async for chunk in _generic_rag_query_stream(query, _config, session_messages):
+    """RAG 기반 법률 Q&A — 스트리밍 응답 (category: 사용자가 직접 고른 분야)"""
+    async for chunk in _generic_rag_query_stream(query, _config, session_messages, category):
         yield chunk
-

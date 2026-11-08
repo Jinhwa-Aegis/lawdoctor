@@ -12,7 +12,9 @@ from api.review import router as review_router
 from api.feedback import router as feedback_router
 from api.admin import router as admin_router
 from api.security import router as security_router
-from db.database import engine, Base
+from sqlalchemy import text
+
+from db.database import engine, Base, SCHEMA_PATCHES
 from models import Document  # noqa: F401 — Base.metadata에 등록
 from core.scheduler import start_scheduler, shutdown_scheduler
 from middleware.auth import get_current_user
@@ -44,6 +46,13 @@ async def lifespan(app: FastAPI):
         async with engine.begin() as conn:
             await conn.run_sync(Base.metadata.create_all)
         logger.info("개발 환경: 테이블 자동 생성 완료")
+    # create_all은 기존 테이블에 컬럼을 추가하지 않으므로 신규 컬럼을 보정한다 (모든 환경, 멱등)
+    for stmt in SCHEMA_PATCHES:
+        try:
+            async with engine.begin() as conn:
+                await conn.execute(text(stmt))
+        except Exception as exc:
+            logger.error("스키마 보정 실패 — db/migrations 수동 적용 필요", sql=stmt, error=str(exc))
     start_scheduler()
     yield
     shutdown_scheduler()

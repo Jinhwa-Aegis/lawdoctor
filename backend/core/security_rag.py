@@ -97,6 +97,8 @@ _config = RAGConfig(
     domain_name="보안",
     enable_query_rewrite=True,
     enable_multihop=False,
+    enable_citation_verification=True,  # 보안 답변도 개인정보보호법 등 법령을 인용함
+    enable_followups=True,
 )
 
 

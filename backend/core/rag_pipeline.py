@@ -7,19 +7,35 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import AsyncGenerator, Callable
 
 import asyncio
 
 import structlog
 
+from core.citation_verifier import verify_citations
+from core.confidence import combine_confidence, parse_stated_confidence
 from core.embeddings import embed_text
+from core.followups import generate_followups
+from core.multi_perspective import (
+    PerspectiveConfig,
+    append_unique,
+    filter_by_sources,
+    coordinator_prompt,
+    coordinator_user_message,
+    make_domain_classification,
+    merge_balanced,
+    opinions_text,
+    run_experts,
+    select_domains,
+)
 from core.hybrid_search import get_bm25_index, reciprocal_rank_fusion
 from core.llm import get_llm_client
 from core.multihop import plan_multihop
 from core.query_rewriter import rewrite_query
 from core.reranker import rerank_results
+from data.law_api import article_label
 from data.vector_store import get_vector_store
 from models.chat import ConfidenceLevel
 
@@ -30,6 +46,10 @@ logger = structlog.get_logger()
 # ---------------------------------------------------------------------------
 _HIGH_CONFIDENCE_DISTANCE = 0.3
 _MEDIUM_CONFIDENCE_DISTANCE = 0.6
+
+# 답변 후처리 시간 제한 (초) — 개별 법령 조회는 citation_verifier에서 별도 제한
+_VERIFY_TIMEOUT_SECONDS = 15.0
+_FOLLOWUP_TIMEOUT_SECONDS = 10.0
 
 
 # ---------------------------------------------------------------------------
@@ -69,6 +89,13 @@ class RAGConfig:
     domain_name: str = "general"          # 로그 식별용 도메인 이름
     enable_query_rewrite: bool = True     # 질의 재작성 활성화
     enable_multihop: bool = False         # 멀티홉 추론 활성화
+    enable_citation_verification: bool = False  # 답변 내 법령 인용 실존 검증
+    enable_followups: bool = True               # 후속 질문 추천
+    expand_query_fn: Callable[[str], str] | None = None  # 검색 질의 보강 (일상어 → 법령 용어)
+    perspective: PerspectiveConfig | None = None         # 분야 간 의견 대조 (복수 분야 질의)
+    concept_queries_fn: Callable[[str], list[str]] | None = None  # 법령 개념별 추가 검색
+    concept_collection: str = "laws"                     # 개념 검색 대상 컬렉션
+    concept_top_k: int = 2                               # 개념마다 보탤 조문 수
 
 
 # ---------------------------------------------------------------------------
@@ -218,7 +245,7 @@ def _format_citation_header(meta: dict, idx: int) -> str:
         art_title = meta.get("article_title", "")
         header += f" 법령: {law_name}"
         if art_num:
-            header += f" 제{art_num}조"
+            header += f" {article_label(art_num)}"
         if art_title:
             header += f" ({art_title})"
     elif meta.get("guide_name"):
@@ -342,10 +369,21 @@ async def _prepare_multihop_context(
     return merged
 
 
+def apply_category_override(classification, category):
+    """사용자가 직접 고른 분야로 주 분야를 바꾼다. 원래 분류된 분야는 관련 분야로 남긴다."""
+    if category is None or classification.category == category:
+        return classification
+    related = [c for c in getattr(classification, "related_categories", []) if c != category]
+    if classification.category not in related:
+        related.insert(0, classification.category)
+    return classification.model_copy(update={"category": category, "related_categories": related})
+
+
 async def _prepare_rag_context(
     query: str,
     config: RAGConfig,
     session_messages: list[dict] | None = None,
+    category_override=None,
 ) -> tuple:
     """RAG 컨텍스트를 준비하는 공통 로직.
 
@@ -353,7 +391,7 @@ async def _prepare_rag_context(
         (classification, messages, {collection_name: search_results})
     """
     # 1. 질의 분석
-    classification = config.analyze_fn(query)
+    classification = apply_category_override(config.analyze_fn(query), category_override)
     logger.info(
         f"{config.domain_name} 질의 분석 완료",
         category=(
@@ -377,6 +415,13 @@ async def _prepare_rag_context(
                 rewritten=search_query,
             )
 
+    # 2-1. 검색 질의 보강 (분류·LLM 질문에는 원문 사용)
+    if config.expand_query_fn:
+        expanded = config.expand_query_fn(search_query)
+        if expanded != search_query:
+            logger.info("검색 질의 법령 용어 보강", original=search_query, expanded=expanded)
+            search_query = expanded
+
     # 3. 멀티홉 판단 (활성화 시)
     multihop_plan = None
     if config.enable_multihop:
@@ -399,6 +444,53 @@ async def _prepare_rag_context(
             _search_collections, search_query, query_embedding,
             config.collections, classification,
         )
+
+    # 4-1. 분야 간 의견 대조 대상이면 분야별로 법령을 나눠 검색해 균형 있게 합친다
+    domains = (
+        select_domains(classification, config.perspective, category_override)
+        if config.perspective else []
+    )
+    if domains:
+        law_col = next(
+            (c for c in config.collections if c.name == config.perspective.law_collection), None,
+        )
+        if law_col:
+            pcfg = config.perspective
+            # 같은 조문의 여러 청크를 걸러낸 뒤에도 조문이 충분하도록 후보를 넉넉히 가져온다
+            fetch_col = replace(law_col, n_results=pcfg.per_domain_fetch)
+            domain_embedding = await embed_text(search_query)
+            per_domain = await asyncio.gather(*[
+                asyncio.to_thread(
+                    _search_collections, search_query, domain_embedding, [fetch_col],
+                    make_domain_classification(classification, d),
+                )
+                for d in domains
+            ])
+            search_results[law_col.name] = merge_balanced(
+                [
+                    filter_by_sources(r[law_col.name], pcfg.domain_sources.get(d, []))
+                    for d, r in zip(domains, per_domain)
+                ],
+                limit=pcfg.per_domain_results * len(domains),
+                per_domain_limit=pcfg.per_domain_results,
+            )
+            logger.info("분야별 균형 검색", domains=[str(d) for d in domains])
+
+    # 4-2. 개념 검색: 질의 속 일상어에 대응하는 법령 개념으로 따로 검색해 근거를 보탠다
+    #      (질문의 지배적인 단어에 가려 두 번째 쟁점의 조문이 빠지는 것을 막는다)
+    concepts = config.concept_queries_fn(query) if config.concept_queries_fn else []
+    concept_col = next((c for c in config.collections if c.name == config.concept_collection), None)
+    if concepts and concept_col and concept_col.name in search_results:
+        vs = get_vector_store()
+        concept_embeddings = await asyncio.gather(*[embed_text(c) for c in concepts])
+        concept_results = await asyncio.gather(*[
+            asyncio.to_thread(vs.search, concept_col.name, emb, config.concept_top_k + 3)
+            for emb in concept_embeddings
+        ])
+        search_results[concept_col.name] = append_unique(
+            search_results[concept_col.name], concept_results, per_extra=config.concept_top_k,
+        )
+        logger.info("개념 검색 보강", concepts=concepts)
 
     # 5. 글로벌 인용 번호 부여 + 컨텍스트 조합
     context_parts = []
@@ -452,7 +544,89 @@ async def _prepare_rag_context(
         ),
     })
 
-    return classification, messages, search_results, all_citations
+    return classification, messages, search_results, all_citations, context, domains
+
+
+async def _apply_perspectives(query, config, context, domains, messages):
+    """분야별 검토를 실행하고, 종합 답변용 시스템 프롬프트·메시지를 만든다.
+
+    Returns:
+        (opinions, system_prompt, messages)
+    """
+    opinions = await run_experts(query, context, domains, config.perspective)
+    if len(opinions) < 2:  # 한 분야만 성공하면 일반 답변으로 진행
+        return opinions, config.system_prompt, messages
+    messages = [*messages[:-1], {
+        **messages[-1], "content": coordinator_user_message(messages[-1]["content"], opinions),
+    }]
+    return opinions, coordinator_prompt(config.system_prompt, opinions), messages
+
+
+# ---------------------------------------------------------------------------
+# 답변 후처리 — 인용 검증 + 후속 질문 (병렬)
+# ---------------------------------------------------------------------------
+
+async def _post_process_answer(
+    query: str,
+    answer: str,
+    config: RAGConfig,
+    retrieval_confidence: ConfidenceLevel = ConfidenceLevel.MEDIUM,
+    extra_verify_text: str = "",
+) -> dict:
+    """답변 생성 후 인용 검증과 후속 질문 생성을 병렬로 수행한다.
+
+    어느 한쪽이 실패해도 나머지 결과는 반환한다.
+
+    Returns:
+        {"verified_citations": list[dict], "followups": list[str]}
+    """
+    async def _noop() -> list:
+        return []
+
+    async def _bounded(coro, timeout: float, name: str) -> list:
+        """시간 제한 초과 시 빈 결과 — 답변 저장(done)이 늦어지지 않게 한다."""
+        try:
+            return await asyncio.wait_for(coro, timeout=timeout)
+        except asyncio.TimeoutError:
+            logger.warning("후처리 시간 초과", task=name, timeout=timeout)
+            return []
+
+    verify_task = (
+        _bounded(
+            verify_citations(f"{answer}\n{extra_verify_text}" if extra_verify_text else answer),
+            _VERIFY_TIMEOUT_SECONDS, "citation_verification",
+        )
+        if config.enable_citation_verification else _noop()
+    )
+    followup_task = (
+        _bounded(
+            generate_followups(query, answer, domain=config.domain_name),
+            _FOLLOWUP_TIMEOUT_SECONDS, "followups",
+        )
+        if config.enable_followups else _noop()
+    )
+    verified, followups = await asyncio.gather(
+        verify_task, followup_task, return_exceptions=True,
+    )
+
+    if isinstance(verified, BaseException):
+        logger.warning("인용 검증 실패", error=str(verified))
+        verified = []
+    if isinstance(followups, BaseException):
+        logger.warning("후속 질문 생성 실패", error=str(followups))
+        followups = []
+
+    # 최종 신뢰도 = min(검색 근거, AI 자체 평가, 인용 검증 결과)
+    stated, reason = parse_stated_confidence(answer)
+    final, adjustments = combine_confidence(retrieval_confidence, stated, verified)
+
+    return {
+        "verified_citations": verified,
+        "followups": followups,
+        "confidence": final.value,
+        "confidence_reason": reason,
+        "confidence_adjustments": adjustments,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -463,16 +637,25 @@ async def rag_query(
     query: str,
     config: RAGConfig,
     session_messages: list[dict] | None = None,
+    category_override=None,
 ) -> dict:
     """RAG 기반 Q&A — 일반(논스트리밍) 응답"""
-    classification, messages, search_results, citations = await _prepare_rag_context(
-        query, config, session_messages,
+    classification, messages, search_results, citations, context, domains = await _prepare_rag_context(
+        query, config, session_messages, category_override,
     )
+
+    # 분야 간 의견 대조 (복수 분야 질의)
+    opinions: list[dict] = []
+    system_prompt = config.system_prompt
+    if domains:
+        opinions, system_prompt, messages = await _apply_perspectives(
+            query, config, context, domains, messages,
+        )
 
     # LLM 답변 생성
     client = get_llm_client()
     answer = await client.generate(
-        system_prompt=config.system_prompt,
+        system_prompt=system_prompt,
         messages=messages,
     )
 
@@ -481,11 +664,17 @@ async def rag_query(
     confidence = _estimate_confidence(primary_results, classification)
 
     # 결과 구성
+    answer_meta = await _post_process_answer(
+        query, answer, config, confidence, extra_verify_text=opinions_text(opinions),
+    )
+    if opinions:
+        answer_meta["perspectives"] = opinions
     result: dict = {
         "answer": answer,
-        "confidence": confidence,
+        "confidence": ConfidenceLevel(answer_meta["confidence"]),
         "classification": classification,
         "citations": citations,
+        "answer_meta": answer_meta,
     }
     for col in config.collections:
         extract_fn = config.extract_refs_fns.get(col.name, _default_extract_references)
@@ -502,10 +691,11 @@ async def rag_query_stream(
     query: str,
     config: RAGConfig,
     session_messages: list[dict] | None = None,
+    category_override=None,
 ) -> AsyncGenerator[dict, None]:
     """RAG 기반 Q&A — 스트리밍 응답"""
-    classification, messages, search_results, citations = await _prepare_rag_context(
-        query, config, session_messages,
+    classification, messages, search_results, citations, context, domains = await _prepare_rag_context(
+        query, config, session_messages, category_override,
     )
 
     # 메타데이터 먼저 전송
@@ -517,19 +707,41 @@ async def rag_query_stream(
         "classification": classification.model_dump(),
         "confidence": confidence.value,
         "citations": citations,
+        "perspective_domains": [config.perspective.labels[d] for d in domains] if domains else [],
     }
     for col in config.collections:
         extract_fn = config.extract_refs_fns.get(col.name, _default_extract_references)
         metadata[col.ref_key] = extract_fn(search_results[col.name])
     yield metadata
 
+    # 분야 간 의견 대조 (복수 분야 질의) — 분야별 검토 결과를 먼저 보낸다
+    opinions: list[dict] = []
+    system_prompt = config.system_prompt
+    if domains:
+        yield {"type": "status", "stage": "perspectives"}
+        opinions, system_prompt, messages = await _apply_perspectives(
+            query, config, context, domains, messages,
+        )
+        yield {"type": "perspectives", "items": opinions}
+
     # LLM 스트리밍
     client = get_llm_client()
+    full_answer = ""
     async for chunk in client.generate_stream(
-        system_prompt=config.system_prompt,
+        system_prompt=system_prompt,
         messages=messages,
     ):
+        full_answer += chunk
         yield {"type": "text", "content": chunk}
 
-    yield {"type": "done"}
+    # 후처리 결과(인용 검증 + 후속 질문)를 done 직전에 전송
+    if config.enable_citation_verification or config.enable_followups:
+        yield {"type": "status", "stage": "post_processing"}
+    answer_meta = await _post_process_answer(
+        query, full_answer, config, confidence, extra_verify_text=opinions_text(opinions),
+    )
+    if opinions:
+        answer_meta["perspectives"] = opinions
+    yield {"type": "answer_meta", **answer_meta}
 
+    yield {"type": "done"}

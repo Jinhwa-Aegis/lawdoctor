@@ -18,9 +18,43 @@ logger = structlog.get_logger(__name__)
 BASE_URL = "http://www.law.go.kr/DRF/lawSearch.do"
 DETAIL_URL = "http://www.law.go.kr/DRF/lawService.do"
 
+# 법령 검색 1회 최대 결과 수 (API 상한 100) — 결과가 가나다순이라 정확한 법령명을 찾으려면 넉넉히 받아야 함
+SEARCH_DISPLAY_MAX = 100
+
 # 저가치 조문 필터링 설정
 _LOW_VALUE_PATTERNS = ["부칙", "경과규정"]
 _MIN_ARTICLE_LENGTH = 30
+
+
+def article_label(article_number: str) -> str:
+    """조 번호를 표기 형식으로 변환한다. (예: 15 → 제15조, 25의2 → 제25조의2)"""
+    main, _, branch = str(article_number).partition("의")
+    return f"제{main}조" + (f"의{branch}" if branch else "")
+
+
+def _collect_article_text(article: ET.Element) -> str:
+    """조문단위 XML에서 조문내용 + 항·호·목 내용을 순서대로 합친 본문을 만든다.
+
+    국가법령정보센터 응답은 조문 본문을 <항>/<호>/<목> 하위 요소에 담는다.
+    <조문내용>만 읽으면 대부분의 조문이 제목 한 줄만 남는다.
+    """
+    lines: list[str] = []
+    head = (article.findtext("조문내용", "") or "").strip()
+    if head:
+        lines.append(head)
+    for hang in article.findall("항"):
+        hang_text = (hang.findtext("항내용", "") or "").strip()
+        if hang_text:
+            lines.append(hang_text)
+        for ho in hang.findall("호"):
+            ho_text = (ho.findtext("호내용", "") or "").strip()
+            if ho_text:
+                lines.append(ho_text)
+            for mok in ho.findall("목"):
+                mok_text = (mok.findtext("목내용", "") or "").strip()
+                if mok_text:
+                    lines.append(mok_text)
+    return "\n".join(lines)
 
 
 def _filter_articles(articles: list[dict]) -> list[dict]:
@@ -183,13 +217,18 @@ async def get_law_detail(law_mst: str) -> dict:
         for article in root.findall(".//조문단위"):
             article_num = article.findtext("조문번호", "")
             article_title = article.findtext("조문여백", "") or article.findtext("조문제목", "")
-            article_content = article.findtext("조문내용", "")
+            # 조문내용은 "제15조(제목)" 한 줄뿐인 경우가 많고 본문은 항·호·목에 있으므로 합친다
+            article_content = _collect_article_text(article)
 
             if article_content:
                 articles.append({
                     "article_num": article_num,
                     "article_title": article_title,
                     "content": article_content,
+                    # 가지 조문 번호 (예: 제15조의2 → "2"), 인용 검증에 사용
+                    "article_branch": article.findtext("조문가지번호", "") or "",
+                    # 장·절 제목 행 여부 (조문여부 = "전문")
+                    "is_heading": article.findtext("조문여부", "") == "전문",
                 })
 
         # 항(조문내 세부) 추출 — 조문단위가 없는 경우 대비
@@ -293,21 +332,27 @@ async def fetch_and_ingest_laws(
         try:
             # 법령 검색
             logger.info("searching_law", law_name=law_name)
-            search_results = await search_laws(law_name, display=5)
+            # 검색 결과는 가나다순이라 짧은 법령명(예: "상법")은 정확히 일치하는 결과가 뒤쪽에 있다
+            search_results = await search_laws(law_name, display=SEARCH_DISPLAY_MAX)
 
             if not search_results:
                 logger.warning("no_search_results", law_name=law_name)
                 results[law_name] = 0
                 continue
 
-            # 정확한 법령명 매칭 시도, 없으면 첫 번째 결과 사용
-            law_info = None
-            for sr in search_results:
-                if sr["law_name"] == law_name:
-                    law_info = sr
-                    break
+            # 정확히 일치하는 법령만 적재 (다른 법령을 잘못 적재하지 않도록 첫 결과로 대체하지 않음)
+            law_info = next(
+                (sr for sr in search_results if sr["law_name"].replace(" ", "") == law_name.replace(" ", "")),
+                None,
+            )
             if law_info is None:
-                law_info = search_results[0]
+                logger.warning(
+                    "no_exact_law_match",
+                    law_name=law_name,
+                    candidates=[sr["law_name"] for sr in search_results[:5]],
+                )
+                results[law_name] = 0
+                continue
 
             law_id = law_info["law_id"]
             law_mst = law_info.get("law_mst", law_id)
@@ -340,12 +385,15 @@ async def fetch_and_ingest_laws(
             global_chunk_idx = 0
             for art in articles:
                 art_num = art.get("article_num", "")
+                branch = str(art.get("article_branch", "") or "").strip()
+                if branch and branch != "0":
+                    art_num = f"{art_num}의{branch}"  # 가지 조문 (예: 제25조의2)
                 art_title = art.get("article_title", "")
                 content = art.get("content", "")
                 if not content.strip():
                     continue
 
-                context = f"{law_detail['law_name']} 제{art_num}조"
+                context = f"{law_detail['law_name']} {article_label(art_num)}"
                 if art_title:
                     context += f" ({art_title})"
 
@@ -742,4 +790,3 @@ async def fetch_and_ingest_precedents(
     )
 
     return results
-

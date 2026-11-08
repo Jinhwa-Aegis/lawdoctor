@@ -78,6 +78,8 @@ class ChatMessage(Base):
     legal_references: Mapped[list | None] = mapped_column(JSON, nullable=True)
     # 보안 참조 정보 (JSON 배열)
     security_references: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    # 답변 후처리 결과 (인용 검증 결과, 후속 질문) — {"verified_citations": [...], "followups": [...]}
+    answer_meta: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     # 에스컬레이션 여부
     is_escalated: Mapped[bool] = mapped_column(default=False)
     created_at: Mapped[datetime] = mapped_column(

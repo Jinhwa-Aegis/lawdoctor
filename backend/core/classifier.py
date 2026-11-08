@@ -22,6 +22,7 @@ CATEGORY_KEYWORDS: dict[LegalCategory, list[str]] = {
         "개인정보", "처리방침", "동의서", "정보통신망", "위탁", "영향평가",
         "개인정보보호법", "정보통신망법", "처리위탁", "제3자 제공", "파기",
         "수집", "이용목적", "동의 철회", "열람 청구", "GDPR", "가명정보",
+        "CCTV", "cctv", "영상정보", "영상정보처리기기", "녹화", "주민등록번호",
     ],
     LegalCategory.CONTRACT: [
         "계약", "NDA", "SLA", "라이선스", "납품", "하도급", "위약금",
@@ -45,6 +46,8 @@ CATEGORY_KEYWORDS: dict[LegalCategory, list[str]] = {
 
 class ClassificationResult(BaseModel):
     category: LegalCategory
+    # 주 분야 외에 함께 관련된 분야 (예: 공동주택 CCTV 질의 → 개인정보)
+    related_categories: list[LegalCategory] = []
     is_high_risk: bool
     detected_keywords: list[str]
     requires_escalation: bool
