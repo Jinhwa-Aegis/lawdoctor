@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from 'react'
-import { Plus, Send, Loader } from 'lucide-react'
+import { Plus, Send, Loader, Trash2 } from 'lucide-react'
 
 let _msgIdCounter = 0
 function nextMsgId() {
@@ -27,6 +27,7 @@ export default function ChatPageTemplate({
   sendStreamFn,
   getSessionsFn,
   getSessionMessagesFn,
+  deleteSessionFn,
   MessageComponent,
   sidebarIcon: SidebarIcon,
   newChatLabel = '새 대화',
@@ -80,6 +81,23 @@ export default function ChatPageTemplate({
     setStreamingContent('')
     setStreamingMeta(null)
     inputRef.current?.focus()
+  }
+
+  const handleDeleteSession = async (e, sessionId) => {
+    e.stopPropagation()
+    if (!confirm('이 대화를 삭제하시겠습니까?')) return
+
+    try {
+      await deleteSessionFn(sessionId)
+      if (currentSessionId === sessionId) {
+        setCurrentSessionId(null)
+        setMessages([])
+      }
+      setSessions(prev => prev.filter(s => s.id !== sessionId))
+    } catch (err) {
+      console.error('세션 삭제 실패:', err)
+      alert('삭제에 실패했습니다.')
+    }
   }
 
   const handleSend = async () => {
@@ -181,9 +199,16 @@ export default function ChatPageTemplate({
                   : 'text-gray-700 hover:bg-gray-100'
               }`}
             >
-              <div className="flex items-center gap-2">
+              <div className="flex items-center gap-2 group/item">
                 <SidebarIcon className="h-3.5 w-3.5 flex-shrink-0" />
-                <span className="truncate">{session.title}</span>
+                <span className="truncate flex-1">{session.title}</span>
+                <button
+                  onClick={(e) => handleDeleteSession(e, session.id)}
+                  className="hidden group-hover/item:block p-0.5 text-gray-400 hover:text-red-500 transition-colors"
+                  title="대화 삭제"
+                >
+                  <Trash2 className="h-3.5 w-3.5" />
+                </button>
               </div>
               {session[sessionCategoryField] && (
                 <span className="text-xs text-gray-500 ml-6">{session[sessionCategoryField]}</span>
@@ -265,3 +290,4 @@ export default function ChatPageTemplate({
     </div>
   )
 }
+

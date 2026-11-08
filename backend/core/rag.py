@@ -92,14 +92,44 @@ def _build_legal_context(search_results: dict) -> str:
 
 
 def _extract_legal_references(search_results: dict) -> list[dict]:
-    """법률 검색 결과에서 참고 문헌 정보 추출"""
+    """법률 검색 결과에서 참고 문헌 정보 추출
+
+    각 참조에 조문 번호, 조문 제목, 조문 발췌(excerpt)를 포함하여
+    사용자가 근거 법령을 상세하게 확인할 수 있도록 한다.
+    """
     if not search_results or not search_results.get("metadatas"):
         return []
 
+    metadatas = search_results["metadatas"][0]
+    documents = (
+        search_results["documents"][0]
+        if search_results.get("documents")
+        else [""] * len(metadatas)
+    )
+
+    # 중복 제거용 (법령+조문번호 또는 판례번호 기준)
+    seen: set[str] = set()
     references = []
-    for meta in search_results["metadatas"][0]:
+
+    for meta, doc_text in zip(metadatas, documents):
         source_type = meta.get("source_type", "")
+
+        # 조문 발췌: 컨텍스트 프리픽스(【...】) 제거 후 앞부분 발췌
+        excerpt = doc_text or ""
+        if excerpt.startswith("【"):
+            newline_pos = excerpt.find("\n")
+            if newline_pos > 0:
+                excerpt = excerpt[newline_pos + 1:]
+        excerpt = excerpt.strip()
+        if len(excerpt) > 200:
+            excerpt = excerpt[:200] + "…"
+
         if source_type == "precedent":
+            dedup_key = f"prec:{meta.get('case_number', '')}"
+            if dedup_key in seen:
+                continue
+            seen.add(dedup_key)
+
             ref = {
                 "source": meta.get("source", ""),
                 "source_type": source_type,
@@ -107,16 +137,42 @@ def _extract_legal_references(search_results: dict) -> list[dict]:
                 "case_number": meta.get("case_number", ""),
                 "court": meta.get("court", ""),
                 "decision_date": meta.get("decision_date", ""),
+                "excerpt": excerpt,
             }
-        else:
+        elif source_type == "law":
+            article_number = meta.get("article_number", "")
+            article_title = meta.get("article_title", "")
+            law_name = meta.get("law_name", meta.get("source", ""))
+
+            dedup_key = f"law:{law_name}:제{article_number}조"
+            if dedup_key in seen:
+                continue
+            seen.add(dedup_key)
+
             ref = {
                 "source": meta.get("source", ""),
                 "source_type": source_type,
-                "law_name": meta.get("law_name", ""),
-                "article": meta.get("article", ""),
+                "law_name": law_name,
+                "article_number": article_number,
+                "article_title": article_title,
+                "excerpt": excerpt,
             }
-        if any(ref.values()):
+        else:
+            # consultation 등
+            dedup_key = f"other:{meta.get('source', '')}:{meta.get('chunk_index', '')}"
+            if dedup_key in seen:
+                continue
+            seen.add(dedup_key)
+
+            ref = {
+                "source": meta.get("source", ""),
+                "source_type": source_type,
+                "excerpt": excerpt,
+            }
+
+        if any(v for k, v in ref.items() if k != "source_type"):
             references.append(ref)
+
     return references
 
 
@@ -162,6 +218,8 @@ _config = RAGConfig(
         "precedents": _extract_legal_references,
     },
     domain_name="법률",
+    enable_query_rewrite=True,
+    enable_multihop=True,
 )
 
 
@@ -184,3 +242,4 @@ async def rag_query_stream(
     """RAG 기반 법률 Q&A — 스트리밍 응답"""
     async for chunk in _generic_rag_query_stream(query, _config, session_messages):
         yield chunk
+

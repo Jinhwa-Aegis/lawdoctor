@@ -40,6 +40,11 @@ class Settings(BaseSettings):
     # LLM 모델 설정
     llm_model: str = Field(default="gpt-4o", alias="LLM_MODEL")
     embedding_model: str = Field(default="text-embedding-3-small", alias="EMBEDDING_MODEL")
+    query_rewrite_model: str = Field(default="gpt-4o-mini", alias="QUERY_REWRITE_MODEL")
+
+    # RAG 파이프라인 설정
+    enable_query_rewrite: bool = Field(default=True, alias="ENABLE_QUERY_REWRITE")
+    enable_multihop: bool = Field(default=True, alias="ENABLE_MULTIHOP")
 
     model_config = {"env_file": ".env", "env_file_encoding": "utf-8", "extra": "ignore"}
 

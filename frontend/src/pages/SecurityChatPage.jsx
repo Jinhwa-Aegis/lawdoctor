@@ -1,5 +1,5 @@
 import { Shield } from 'lucide-react'
-import { sendSecurityMessageStream, getSecuritySessions, getSecuritySessionMessages } from '../api/client'
+import { sendSecurityMessageStream, getSecuritySessions, getSecuritySessionMessages, deleteSecuritySession } from '../api/client'
 import ChatMessage from '../components/ChatMessage'
 import ChatPageTemplate from './ChatPageTemplate'
 
@@ -19,8 +19,8 @@ const SECURITY_DOMAIN_CONFIG = {
   disclaimer: '⚠️ 본 답변은 AI가 생성한 참고 정보이며, 조직의 보안 정책을 대체하는 공식 보안 자문이 아닙니다. 중요한 보안 결정이 필요한 경우 정보보안 담당자 또는 외부 보안 전문가와 상담하시기 바랍니다.',
 }
 
-function SecurityMessage({ message }) {
-  return <ChatMessage message={message} domainConfig={SECURITY_DOMAIN_CONFIG} />
+function SecurityMessage(props) {
+  return <ChatMessage {...props} domainConfig={SECURITY_DOMAIN_CONFIG} />
 }
 
 function SecurityEmptyState({ setInputText, inputRef }) {
@@ -60,19 +60,33 @@ export default function SecurityChatPage() {
       sendStreamFn={sendSecurityMessageStream}
       getSessionsFn={getSecuritySessions}
       getSessionMessagesFn={getSecuritySessionMessages}
+      deleteSessionFn={deleteSecuritySession}
       MessageComponent={SecurityMessage}
       sidebarIcon={Shield}
       newChatLabel="새 보안 상담"
       emptySessionText={'보안 상담 이력이 없습니다.\n새 상담을 시작해보세요.'}
       sessionCategoryField="security_category"
+      categoryLabels={{
+        network: '네트워크 보안',
+        system: '시스템 보안',
+        application: '애플리케이션 보안',
+        cloud: '클라우드 보안',
+        compliance: '컴플라이언스',
+        data_protection: '데이터 보호',
+        incident: '보안 사고 대응',
+        audit: '보안 감사',
+      }}
       placeholder="정보보안 관련 질문을 입력하세요..."
       emptyState={SecurityEmptyState}
       buildAiMessage={(metadata) => ({
         security_references: metadata?.security_references || [],
+        citations: metadata?.citations || [],
       })}
       buildStreamingMessage={(meta) => ({
         security_references: meta?.security_references,
+        citations: meta?.citations,
       })}
     />
   )
 }
+

@@ -17,6 +17,8 @@ import structlog
 from core.embeddings import embed_text
 from core.hybrid_search import get_bm25_index, reciprocal_rank_fusion
 from core.llm import get_llm_client
+from core.multihop import plan_multihop
+from core.query_rewriter import rewrite_query
 from core.reranker import rerank_results
 from data.vector_store import get_vector_store
 from models.chat import ConfidenceLevel
@@ -65,6 +67,8 @@ class RAGConfig:
     build_context_fns: dict[str, BuildContextFn] = field(default_factory=dict)
     extract_refs_fns: dict[str, ExtractRefsFn] = field(default_factory=dict)
     domain_name: str = "general"          # 로그 식별용 도메인 이름
+    enable_query_rewrite: bool = True     # 질의 재작성 활성화
+    enable_multihop: bool = False         # 멀티홉 추론 활성화
 
 
 # ---------------------------------------------------------------------------
@@ -190,8 +194,153 @@ def _search_collections(
 
 
 # ---------------------------------------------------------------------------
+# 인용 헬퍼
+# ---------------------------------------------------------------------------
+
+def _format_citation_header(meta: dict, idx: int) -> str:
+    """메타데이터로부터 인용 헤더를 구성한다 (도메인 자동 감지)."""
+    source_type = meta.get("source_type", "")
+    header = f"[{idx}]"
+
+    if source_type == "precedent":
+        name = meta.get("case_name", "")
+        court = meta.get("court", "")
+        case_num = meta.get("case_number", "")
+        header += f" 판례: {name}"
+        if court:
+            header += f" ({court}"
+            if case_num:
+                header += f" {case_num}"
+            header += ")"
+    elif source_type == "law":
+        law_name = meta.get("law_name", meta.get("source", ""))
+        art_num = meta.get("article_number", "")
+        art_title = meta.get("article_title", "")
+        header += f" 법령: {law_name}"
+        if art_num:
+            header += f" 제{art_num}조"
+        if art_title:
+            header += f" ({art_title})"
+    elif meta.get("guide_name"):
+        header += f" {meta['guide_name']}"
+        if meta.get("standard"):
+            header += f" ({meta['standard']})"
+        if meta.get("section"):
+            header += f" — {meta['section']}"
+    elif source_type == "consultation":
+        header += f" 자문: {meta.get('source', '자문 이력')}"
+    else:
+        header += f" {meta.get('source', '참고자료')}"
+
+    return header
+
+
+def _build_citation(meta: dict, doc: str, idx: int) -> dict:
+    """검색 결과 1건으로부터 인용 정보 딕셔너리를 구성한다."""
+    # 발췌: 컨텍스트 프리픽스(【...】) 제거 후 앞부분 발췌
+    excerpt = doc or ""
+    if excerpt.startswith("【"):
+        nl = excerpt.find("\n")
+        if nl > 0:
+            excerpt = excerpt[nl + 1:]
+    excerpt = excerpt.strip()
+    if len(excerpt) > 300:
+        excerpt = excerpt[:300] + "…"
+
+    source_type = meta.get("source_type", "")
+
+    citation: dict = {
+        "citation_id": idx,
+        "source_type": source_type,
+        "source": meta.get("source", ""),
+        "excerpt": excerpt,
+    }
+
+    if source_type == "law":
+        citation.update({
+            "law_name": meta.get("law_name", meta.get("source", "")),
+            "article_number": meta.get("article_number", ""),
+            "article_title": meta.get("article_title", ""),
+        })
+    elif source_type == "precedent":
+        citation.update({
+            "case_name": meta.get("case_name", ""),
+            "case_number": meta.get("case_number", ""),
+            "court": meta.get("court", ""),
+            "decision_date": meta.get("decision_date", ""),
+        })
+    elif meta.get("guide_name"):
+        citation.update({
+            "guide_name": meta.get("guide_name", ""),
+            "standard": meta.get("standard", ""),
+            "section": meta.get("section", ""),
+        })
+
+    return citation
+
+
+# ---------------------------------------------------------------------------
 # RAG 컨텍스트 준비 (공통 로직)
 # ---------------------------------------------------------------------------
+
+async def _prepare_multihop_context(
+    query: str,
+    config: RAGConfig,
+    classification,
+    multihop_plan,
+    search_query: str,
+) -> dict[str, dict]:
+    """멀티홉 질의의 하위 질문별 병렬 검색 및 결과 통합.
+
+    각 sub_query를 병렬로 임베딩·검색한 후 document ID 기반 중복 제거 후
+    통합 결과에 리랭킹을 적용한다.
+    """
+    from core.reranker import rerank_results as _rerank
+
+    async def _search_sub(sub_query_text: str) -> dict[str, dict]:
+        emb = await embed_text(sub_query_text)
+        return await asyncio.to_thread(
+            _search_collections, sub_query_text, emb, config.collections, classification,
+        )
+
+    # 병렬 실행
+    sub_results_list = await asyncio.gather(
+        *[_search_sub(sq.query) for sq in multihop_plan.sub_queries]
+    )
+
+    # 컬렉션별 결과 통합 (document ID 기반 중복 제거)
+    merged: dict[str, dict] = {}
+    for col in config.collections:
+        seen_ids: set[str] = set()
+        all_docs, all_metas, all_ids, all_dists = [], [], [], []
+
+        for sub_res in sub_results_list:
+            col_res = sub_res.get(col.name, {})
+            ids_list = col_res.get("ids", [[]])[0]
+            docs_list = col_res.get("documents", [[]])[0]
+            metas_list = (col_res.get("metadatas", [[]])[0] if col_res.get("metadatas") else [{}] * len(docs_list))
+            dists_list = (col_res.get("distances", [[]])[0] if col_res.get("distances") else [0.0] * len(docs_list))
+
+            for doc_id, doc, meta, dist in zip(ids_list, docs_list, metas_list, dists_list):
+                if doc_id not in seen_ids:
+                    seen_ids.add(doc_id)
+                    all_ids.append(doc_id)
+                    all_docs.append(doc)
+                    all_metas.append(meta)
+                    all_dists.append(dist)
+
+        raw_merged = {
+            "ids": [all_ids],
+            "documents": [all_docs],
+            "metadatas": [all_metas],
+            "distances": [all_dists],
+        }
+
+        # 통합 결과에 리랭킹 적용
+        merged[col.name] = _rerank(search_query, raw_merged, top_k=col.n_results)
+
+    return merged
+
 
 async def _prepare_rag_context(
     query: str,
@@ -215,33 +364,95 @@ async def _prepare_rag_context(
         is_high_risk=classification.is_high_risk,
     )
 
-    # 2. 질의 임베딩
-    query_embedding = await embed_text(query)
+    # 2. 질의 재작성 (활성화 시)
+    search_query = query
+    rewrite_info = None
+    if config.enable_query_rewrite:
+        rewrite_info = await rewrite_query(query, session_messages)
+        search_query = rewrite_info.rewritten
+        if rewrite_info.was_rewritten:
+            logger.info(
+                "질의 재작성 적용",
+                original=query,
+                rewritten=search_query,
+            )
 
-    # 3. 벡터 검색 (메타데이터 필터링 + 리랭킹 + 하이브리드)
-    # 동기 ChromaDB/BM25 호출을 별도 스레드에서 실행하여 이벤트 루프 블로킹 방지
-    search_results = await asyncio.to_thread(
-        _search_collections, query, query_embedding, config.collections, classification,
-    )
+    # 3. 멀티홉 판단 (활성화 시)
+    multihop_plan = None
+    if config.enable_multihop:
+        multihop_plan = await plan_multihop(search_query, classification)
 
-    # 4. 컨텍스트 조합
+    # 4. 검색 수행
+    if multihop_plan and multihop_plan.needs_multihop:
+        # 멀티홉: 각 sub_query 병렬 검색 → 결과 통합
+        logger.info(
+            "멀티홉 검색 수행",
+            sub_query_count=len(multihop_plan.sub_queries),
+        )
+        search_results = await _prepare_multihop_context(
+            query, config, classification, multihop_plan, search_query,
+        )
+    else:
+        # 단일 검색: 재작성 질의 임베딩 → 검색
+        query_embedding = await embed_text(search_query)
+        search_results = await asyncio.to_thread(
+            _search_collections, search_query, query_embedding,
+            config.collections, classification,
+        )
+
+    # 5. 글로벌 인용 번호 부여 + 컨텍스트 조합
     context_parts = []
+    all_citations: list[dict] = []
+    citation_idx = 1
+
+    if multihop_plan and multihop_plan.needs_multihop:
+        sub_info = "\n".join(
+            f"- {sq.query} ({sq.purpose})"
+            for sq in multihop_plan.sub_queries
+        )
+        context_parts.append(f"## 질의 분해\n{sub_info}")
+
     for col in config.collections:
-        build_fn = config.build_context_fns.get(col.name, _default_build_context)
-        ctx = build_fn(search_results[col.name])
-        context_parts.append(f"## {col.label}\n{ctx}")
+        col_results = search_results.get(col.name, {})
+        docs = col_results.get("documents", [[]])[0] if col_results else []
+        metas = (
+            col_results.get("metadatas", [[]])[0]
+            if col_results and col_results.get("metadatas")
+            else [{}] * len(docs)
+        )
+
+        if not docs:
+            context_parts.append(f"## {col.label}\n관련 자료를 찾을 수 없습니다.")
+            continue
+
+        col_context = []
+        for doc, meta in zip(docs, metas):
+            header = _format_citation_header(meta, citation_idx)
+            col_context.append(f"{header}\n{doc}\n")
+
+            citation = _build_citation(meta, doc, citation_idx)
+            all_citations.append(citation)
+            citation_idx += 1
+
+        context_parts.append(f"## {col.label}\n" + "\n---\n".join(col_context))
+
     context = "\n\n".join(context_parts)
 
-    # 5. 메시지 구성
+    # 6. 메시지 구성 (원본 질의 사용, 인라인 인용 지시)
     messages: list[dict] = []
     if session_messages:
         messages.extend(session_messages)
     messages.append({
         "role": "user",
-        "content": f"다음 참고 자료를 바탕으로 질문에 답변해주세요.\n\n{context}\n\n질문: {query}",
+        "content": (
+            "다음 참고 자료를 바탕으로 질문에 답변해주세요.\n"
+            "답변 본문에서 참고 자료를 인용할 때 반드시 [1], [2] 등의 번호를 "
+            "해당 문장 끝에 표시하세요.\n\n"
+            f"{context}\n\n질문: {query}"
+        ),
     })
 
-    return classification, messages, search_results
+    return classification, messages, search_results, all_citations
 
 
 # ---------------------------------------------------------------------------
@@ -254,7 +465,7 @@ async def rag_query(
     session_messages: list[dict] | None = None,
 ) -> dict:
     """RAG 기반 Q&A — 일반(논스트리밍) 응답"""
-    classification, messages, search_results = await _prepare_rag_context(
+    classification, messages, search_results, citations = await _prepare_rag_context(
         query, config, session_messages,
     )
 
@@ -274,6 +485,7 @@ async def rag_query(
         "answer": answer,
         "confidence": confidence,
         "classification": classification,
+        "citations": citations,
     }
     for col in config.collections:
         extract_fn = config.extract_refs_fns.get(col.name, _default_extract_references)
@@ -292,7 +504,7 @@ async def rag_query_stream(
     session_messages: list[dict] | None = None,
 ) -> AsyncGenerator[dict, None]:
     """RAG 기반 Q&A — 스트리밍 응답"""
-    classification, messages, search_results = await _prepare_rag_context(
+    classification, messages, search_results, citations = await _prepare_rag_context(
         query, config, session_messages,
     )
 
@@ -304,6 +516,7 @@ async def rag_query_stream(
         "type": "metadata",
         "classification": classification.model_dump(),
         "confidence": confidence.value,
+        "citations": citations,
     }
     for col in config.collections:
         extract_fn = config.extract_refs_fns.get(col.name, _default_extract_references)
@@ -319,3 +532,4 @@ async def rag_query_stream(
         yield {"type": "text", "content": chunk}
 
     yield {"type": "done"}
+

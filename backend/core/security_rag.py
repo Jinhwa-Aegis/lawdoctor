@@ -95,6 +95,8 @@ _config = RAGConfig(
         "security_incidents": _extract_security_references,
     },
     domain_name="보안",
+    enable_query_rewrite=True,
+    enable_multihop=False,
 )
 
 

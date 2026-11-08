@@ -1,5 +1,5 @@
 import { MessageSquare } from 'lucide-react'
-import { sendMessageStream, getSessions, getSessionMessages } from '../api/client'
+import { sendMessageStream, getSessions, getSessionMessages, deleteSession } from '../api/client'
 import ChatMessage from '../components/ChatMessage'
 import ChatPageTemplate from './ChatPageTemplate'
 
@@ -44,6 +44,7 @@ export default function ChatPage() {
       sendStreamFn={sendMessageStream}
       getSessionsFn={getSessions}
       getSessionMessagesFn={getSessionMessages}
+      deleteSessionFn={deleteSession}
       MessageComponent={LegalMessage}
       sidebarIcon={MessageSquare}
       newChatLabel="새 대화"
@@ -53,9 +54,11 @@ export default function ChatPage() {
       emptyState={LegalEmptyState}
       buildAiMessage={(metadata) => ({
         legal_references: metadata?.legal_references || [],
+        citations: metadata?.citations || [],
       })}
       buildStreamingMessage={(meta) => ({
         legal_references: meta?.legal_references,
+        citations: meta?.citations,
       })}
     />
   )

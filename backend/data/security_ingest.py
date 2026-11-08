@@ -55,7 +55,8 @@ async def ingest_security_pdf(
             logger.warning("빈 PDF", filepath=filepath)
             return 0
 
-        chunks = chunk_text(text, chunk_size=800, overlap=150)
+        from core.semantic_chunker import semantic_chunk_text
+        chunks = semantic_chunk_text(text, doc_type="consultation", max_chunk_size=800)
 
         if not chunks:
             logger.warning("청크 생성 실패", filepath=filepath)
@@ -84,8 +85,9 @@ async def ingest_security_pdf(
         metadatas = [chunk["metadata"] for chunk in chunks]
 
         vector_store = get_vector_store()
-        vector_store.add_documents(
+        vector_store.upsert_and_cleanup(
             collection_name=collection,
+            id_prefix=f"sec_{file_path.stem}_chunk_",
             documents=texts,
             metadatas=metadatas,
             ids=ids,
@@ -741,8 +743,9 @@ async def ingest_builtin_security_knowledge() -> dict[str, int]:
         for item in BUILTIN_SECURITY_GUIDES
     ]
 
-    vector_store.add_documents(
+    vector_store.upsert_and_cleanup(
         collection_name="security_guides",
+        id_prefix="builtin_guide_",
         documents=guide_texts,
         metadatas=guide_metadatas,
         ids=guide_ids,
@@ -770,8 +773,9 @@ async def ingest_builtin_security_knowledge() -> dict[str, int]:
         for item in BUILTIN_SECURITY_INCIDENTS
     ]
 
-    vector_store.add_documents(
+    vector_store.upsert_and_cleanup(
         collection_name="security_incidents",
+        id_prefix="builtin_incident_",
         documents=incident_texts,
         metadatas=incident_metadatas,
         ids=incident_ids,

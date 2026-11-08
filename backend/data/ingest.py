@@ -592,8 +592,9 @@ async def ingest_pdf(
             logger.warning("empty_pdf_content", filepath=filepath)
             return 0
 
-        # 텍스트 청킹
-        chunks = chunk_text(text)
+        # 텍스트 시맨틱 청킹
+        from core.semantic_chunker import semantic_chunk_text
+        chunks = semantic_chunk_text(text, doc_type="consultation")
 
         if not chunks:
             logger.warning("no_chunks_generated", filepath=filepath)
@@ -630,8 +631,9 @@ async def ingest_pdf(
         # 컬렉션 이름 결정
         collection_name = "consultations" if source_type == "consultation" else "laws"
 
-        vector_store.add_documents(
+        vector_store.upsert_and_cleanup(
             collection_name=collection_name,
+            id_prefix=f"{file_path.stem}_chunk_",
             documents=texts,
             metadatas=metadatas,
             ids=ids,

@@ -174,6 +174,26 @@ export async function getSessionMessages(sessionId) {
   return response.json()
 }
 
+export async function deleteSession(sessionId) {
+  const response = await fetch(`${BASE_URL}/chat/sessions/${sessionId}`, {
+    method: 'DELETE',
+    headers: { 'X-User-ID': getUserId() },
+  })
+
+  if (!response.ok) {
+    let message = '세션 삭제에 실패했습니다'
+    try {
+      const body = await response.json()
+      message = body.detail || body.message || message
+    } catch {
+      // 서버가 비JSON 응답 반환
+    }
+    throw new Error(message)
+  }
+
+  return response.json()
+}
+
 export async function uploadContract(file) {
   const formData = new FormData()
   formData.append('file', file)
@@ -334,6 +354,26 @@ export async function getSecuritySessions() {
 
   if (!response.ok) {
     let message = '보안 세션 목록을 불러올 수 없습니다'
+    try {
+      const body = await response.json()
+      message = body.detail || body.message || message
+    } catch {
+      // 서버가 비JSON 응답 반환
+    }
+    throw new Error(message)
+  }
+
+  return response.json()
+}
+
+export async function deleteSecuritySession(sessionId) {
+  const response = await fetch(`${BASE_URL}/security/sessions/${sessionId}`, {
+    method: 'DELETE',
+    headers: { 'X-User-ID': getUserId() },
+  })
+
+  if (!response.ok) {
+    let message = '보안 세션 삭제에 실패했습니다'
     try {
       const body = await response.json()
       message = body.detail || body.message || message

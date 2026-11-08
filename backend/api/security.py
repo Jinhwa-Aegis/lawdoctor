@@ -261,6 +261,24 @@ async def list_security_sessions(
     ]
 
 
+@router.delete("/sessions/{session_id}")
+async def delete_security_session(
+    session_id: int,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """보안 대화 세션 삭제 (메시지 포함 CASCADE 삭제)"""
+    session = await db.get(ChatSession, session_id)
+    if not session or session.user_id != user.id:
+        raise HTTPException(status_code=404, detail="세션을 찾을 수 없습니다.")
+
+    await db.delete(session)
+    await db.commit()
+
+    logger.info("보안 세션 삭제 완료", user_id=user.id, session_id=session_id)
+    return {"detail": "세션이 삭제되었습니다."}
+
+
 @router.get("/sessions/{session_id}/messages", response_model=list[MessageItem])
 async def get_security_session_messages(
     session_id: int,

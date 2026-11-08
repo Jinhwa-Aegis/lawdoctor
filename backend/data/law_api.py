@@ -659,11 +659,12 @@ async def fetch_and_ingest_precedents(
                     case_number = detail.get("case_number", "")
                     context = f"{case_name} ({case_number})" if case_number else case_name
 
-                    chunks = chunk_text(
+                    from core.semantic_chunker import semantic_chunk_text
+                    chunks = semantic_chunk_text(
                         detail["full_text"],
-                        chunk_size=800,
-                        overlap=150,
+                        doc_type="precedent",
                         context_prefix=context,
+                        max_chunk_size=800,
                     )
                     if not chunks:
                         continue
@@ -741,3 +742,4 @@ async def fetch_and_ingest_precedents(
     )
 
     return results
+
